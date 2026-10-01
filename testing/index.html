@@ -100,6 +100,8 @@
                         stdin: () => null,
                         print: (text) => console.log("[FFmpeg stdout]:", text),
                         printErr: (chunk) => {
+                            console.log("[FFmpeg stderr]:", chunk);
+        
                             // Emscripten may pass chunks, single chars, or whole lines
                             stderrBuffer += chunk;
                             
@@ -144,6 +146,7 @@
                     const args = [
                         'ffmpeg',
                         '-y',
+                        '-progress', 'pipe:1',
                         '-i', inputName,
                         '-r', '30',
                         '-pix_fmt', 'yuv420p',
