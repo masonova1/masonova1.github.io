@@ -39,7 +39,7 @@
     <p>Convert an <code>.mp4</code> video to TinyTV <code>.avi</code> video entirely client-side on standard GitHub Pages.</p>
 
     <div class="box">
-        <div id="status">Loading worker and FFmpeg core...</div>
+        <div id="status">Loading FFmpeg core components...</div>
         
         <input type="file" id="uploader" accept="video/mp4" disabled>
         
@@ -68,118 +68,11 @@
         <div id="outputArea"></div>
     </div>
 
-    <!-- 1. INLINE WORKER SCRIPT -->
-    <script id="workerCode" type="javascript/worker">
+    <script>
         const CORE_VERSION = '0.11.1';
         const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
 
         let ffmpegCore = null;
-
-        function parseTimeToSeconds(timeStr) {
-            const parts = timeStr.split(':');
-            if (parts.length !== 3) return 0;
-            return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parts[2]);
-        }
-
-        self.onmessage = async (e) => {
-            const { action, fileData, vfFilter, inputName, outputName, totalDurationSeconds } = e.data;
-
-            if (action === 'init') {
-                try {
-                    // Import FFmpeg Core in worker scope
-                    importScripts(`${CDN_BASE}/ffmpeg-core.js`);
-
-                    ffmpegCore = await createFFmpegCore({
-                        mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
-                        stdin: () => null,
-                        print: (text) => console.log("[FFmpeg stdout]:", text),
-                        printErr: (text) => {
-                            console.log("[FFmpeg stderr]:", text);
-                            if (totalDurationSeconds > 0 && text.includes('time=')) {
-                                const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
-                                if (match && match[1]) {
-                                    const currentSeconds = parseTimeToSeconds(match[1]);
-                                    const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
-                                    self.postMessage({ type: 'progress', percentage });
-                                }
-                            }
-                        }
-                    });
-
-                    self.postMessage({ type: 'ready' });
-                } catch (err) {
-                    self.postMessage({ type: 'error', error: err.message });
-                }
-                return;
-            }
-
-            if (action === 'convert') {
-                let argv = 0;
-                let argPointers = [];
-
-                try {
-                    ffmpegCore.FS.writeFile(inputName, new Uint8Array(fileData));
-
-                    const args = [
-                        'ffmpeg',
-                        '-y',
-                        '-i', inputName,
-                        '-r', '30',
-                        '-pix_fmt', 'yuv420p',
-                        '-strict', 'unofficial',
-                        '-vf', vfFilter,
-                        '-b:v', '2500k',
-                        '-c:v', 'mjpeg',
-                        '-ac', '1',
-                        '-acodec', 'pcm_u8',
-                        '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
-                        outputName
-                    ];
-
-                    const argc = args.length;
-                    argv = ffmpegCore._malloc(argc * 4);
-
-                    for (let i = 0; i < argc; i++) {
-                        const argPtr = ffmpegCore._malloc(args[i].length + 1);
-                        ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
-                        ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
-                        argPointers.push(argPtr);
-                    }
-
-                    try {
-                        ffmpegCore._main(argc, argv);
-                    } catch (err) {
-                        if (err.name !== 'ExitStatus' || err.status !== 0) {
-                            throw err;
-                        }
-                    }
-
-                    const outputData = ffmpegCore.FS.readFile(outputName);
-                    
-                    // Clean virtual file system
-                    ffmpegCore.FS.unlink(inputName);
-                    ffmpegCore.FS.unlink(outputName);
-
-                    // Transfer output buffer back to main thread zero-copy
-                    self.postMessage({ type: 'complete', outputBuffer: outputData.buffer }, [outputData.buffer]);
-
-                } catch (err) {
-                    self.postMessage({ type: 'error', error: err.message });
-                } finally {
-                    for (const ptr of argPointers) {
-                        ffmpegCore._free(ptr);
-                    }
-                    if (argv) {
-                        ffmpegCore._free(argv);
-                    }
-                }
-            }
-        };
-    </script>
-
-    <!-- 2. MAIN APPLICATION SCRIPT -->
-    <script>
-        let worker = null;
         let totalDurationSeconds = 0;
 
         const uploader = document.getElementById('uploader');
@@ -189,6 +82,27 @@
         const progressContainer = document.getElementById('progressContainer');
         const progressBar = document.getElementById('progressBar');
 
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = resolve;
+                script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+                document.head.appendChild(script);
+            });
+        }
+
+        // Helper to convert "HH:MM:SS.ms" strings to total seconds
+        function parseTimeToSeconds(timeStr) {
+            const parts = timeStr.split(':');
+            if (parts.length !== 3) return 0;
+            const hours = parseFloat(parts[0]);
+            const minutes = parseFloat(parts[1]);
+            const seconds = parseFloat(parts[2]);
+            return (hours * 3600) + (minutes * 60) + seconds;
+        }
+
+        // Helper to parse duration directly from input video file via standard HTML5 Video element
         function getVideoDuration(file) {
             return new Promise((resolve) => {
                 const video = document.createElement('video');
@@ -202,60 +116,47 @@
             });
         }
 
-        function initInlineWorker() {
-            // Instantiate Worker from inline <script id="workerCode">
-            const workerBlob = new Blob([document.getElementById('workerCode').textContent], { type: 'text/javascript' });
-            const workerUrl = URL.createObjectURL(workerBlob);
-            worker = new Worker(workerUrl);
+        async function initFFmpeg() {
+            try {
+                statusDiv.innerText = "Fetching single-threaded FFmpeg core...";
+                console.log("Loading ffmpeg-core.js directly...");
 
-            worker.onmessage = (e) => {
-                const { type, percentage, outputBuffer, error } = e.data;
+                await loadScript(`${CDN_BASE}/ffmpeg-core.js`);
 
-                if (type === 'ready') {
-                    statusDiv.innerText = "FFmpeg Worker Ready! Select an MP4 file.";
-                    uploader.disabled = false;
-                }
+                statusDiv.innerText = "Initializing WebAssembly module...";
+                console.log("Instantiating FFmpegModule...");
 
-                if (type === 'progress') {
-                    // Main UI thread is totally free, so DOM updates trigger smoothly
-                    progressBar.style.width = `${percentage}%`;
-                    statusDiv.innerText = `Converting... ${percentage}%`;
-                }
+                ffmpegCore = await createFFmpegCore({
+                    mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
+                    stdin: () => null,
+                    print: (text) => console.log("[FFmpeg stdout]:", text),
+                    printErr: (text) => {
+                        console.log("[FFmpeg stderr]:", text);
 
-                if (type === 'complete') {
-                    progressBar.style.width = '100%';
-                    statusDiv.innerText = "Conversion Complete!";
+                        // Parse standard FFmpeg progress output: time=HH:MM:SS.ms
+                        if (totalDurationSeconds > 0 && text.includes('time=')) {
+                            const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
+                            if (match && match[1]) {
+                                const currentSeconds = parseTimeToSeconds(match[1]);
+                                const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
+                                progressBar.style.width = `${percentage}%`;
+                                statusDiv.innerText = `Converting... ${percentage}%`;
+                            }
+                        }
+                    }
+                });
 
-                    const blob = new Blob([outputBuffer], { type: 'video/avi' });
-                    const url = URL.createObjectURL(blob);
-
-                    const file = uploader.files[0];
-                    const downloadLink = document.createElement('a');
-                    downloadLink.href = url;
-                    downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".avi";
-                    downloadLink.id = "downloadLink";
-                    downloadLink.innerText = "Download Converted AVI";
-
-                    outputArea.appendChild(downloadLink);
-
-                    uploader.disabled = false;
-                    convertBtn.disabled = false;
-                }
-
-                if (type === 'error') {
-                    console.error("Worker Error:", error);
-                    statusDiv.innerText = "Error during transcoding. Check console.";
-                    uploader.disabled = false;
-                    convertBtn.disabled = false;
-                }
-            };
-
-            // Start initialization inside the worker thread
-            worker.postMessage({ action: 'init' });
+                console.log("FFmpeg core initialized successfully!");
+                statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
+                uploader.disabled = false;
+            } catch (error) {
+                console.error("FFmpeg Direct Load Error:", error);
+                statusDiv.innerText = "Failed to load FFmpeg. Check browser console.";
+            }
         }
 
         uploader.addEventListener('change', () => {
-            if (uploader.files.length > 0 && worker) {
+            if (uploader.files.length > 0 && ffmpegCore) {
                 convertBtn.disabled = false;
             }
         });
@@ -265,8 +166,10 @@
             if (!files || files.length === 0) return;
             const file = files[0];
 
+            // Extract total video duration for accurate progress tracking
             totalDurationSeconds = await getVideoDuration(file);
 
+            // Reset UI state
             progressBar.style.width = '0%';
             progressContainer.style.display = 'block';
             convertBtn.disabled = true;
@@ -290,20 +193,91 @@
                     break;
             }
 
-            const arrayBuffer = await file.arrayBuffer();
+            const inputName = 'input.mp4';
+            const outputName = 'output.avi';
 
-            // Post transcoding payload to worker, zero-copy transferring ArrayBuffer
-            worker.postMessage({
-                action: 'convert',
-                fileData: arrayBuffer,
-                vfFilter: vfFilter,
-                inputName: 'input.mp4',
-                outputName: 'output.avi',
-                totalDurationSeconds: totalDurationSeconds
-            }, [arrayBuffer]);
+            let argv = 0;
+            let argPointers = [];
+
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+
+                ffmpegCore.FS.writeFile(inputName, uint8Array);
+
+                const args = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', inputName,
+                    '-r', '30',
+                    '-pix_fmt', 'yuv420p',
+                    '-strict', 'unofficial',
+                    '-vf', vfFilter,
+                    '-b:v', '2500k',
+                    '-c:v', 'mjpeg',
+                    '-ac', '1',
+                    '-acodec', 'pcm_u8',
+                    '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
+                    outputName
+                ];
+
+                const argc = args.length;
+                argv = ffmpegCore._malloc(argc * 4);
+
+                for (let i = 0; i < argc; i++) {
+                    const argPtr = ffmpegCore._malloc(args[i].length + 1);
+                    ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
+                    ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
+                    argPointers.push(argPtr);
+                }
+
+                console.log(`Executing FFmpeg CLI command with vfFilter: "${vfFilter}"`);
+
+                try {
+                    ffmpegCore._main(argc, argv);
+                } catch (err) {
+                    if (err.name === 'ExitStatus' && err.status === 0) {
+                        console.log("FFmpeg exited cleanly with status 0.");
+                    } else {
+                        throw err;
+                    }
+                }
+
+                // Force completion status bar state
+                progressBar.style.width = '100%';
+
+                const outputData = ffmpegCore.FS.readFile(outputName);
+                const blob = new Blob([outputData.buffer], { type: 'video/avi' });
+                const url = URL.createObjectURL(blob);
+
+                const downloadLink = document.createElement('a');
+                downloadLink.href = url;
+                downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".avi";
+                downloadLink.id = "downloadLink";
+                downloadLink.innerText = "Download Converted AVI";
+
+                outputArea.appendChild(downloadLink);
+                statusDiv.innerText = "Conversion Complete!";
+
+                ffmpegCore.FS.unlink(inputName);
+                ffmpegCore.FS.unlink(outputName);
+            } catch (err) {
+                console.error("Transcoding Error:", err);
+                statusDiv.innerText = "An error occurred during transcoding.";
+            } finally {
+                for (const ptr of argPointers) {
+                    ffmpegCore._free(ptr);
+                }
+                if (argv) {
+                    ffmpegCore._free(argv);
+                }
+
+                uploader.disabled = false;
+                convertBtn.disabled = false;
+            }
         });
 
-        initInlineWorker();
+        initFFmpeg();
     </script>
 </body>
 </html>
