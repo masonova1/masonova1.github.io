@@ -126,21 +126,30 @@
                 statusDiv.innerText = "Initializing WebAssembly module...";
                 console.log("Instantiating FFmpegModule...");
 
+                // Rate-limit DOM repaints so you don't slow down processing too much
+                let lastPercentage = -1;
+                
                 ffmpegCore = await createFFmpegCore({
                     mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
                     stdin: () => null,
                     print: (text) => console.log("[FFmpeg stdout]:", text),
                     printErr: (text) => {
-                        console.log("[FFmpeg stderr]:", text);
-
-                        // Parse standard FFmpeg progress output: time=HH:MM:SS.ms
                         if (totalDurationSeconds > 0 && text.includes('time=')) {
                             const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
                             if (match && match[1]) {
                                 const currentSeconds = parseTimeToSeconds(match[1]);
                                 const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
-                                progressBar.style.width = `${percentage}%`;
-                                statusDiv.innerText = `Converting... ${percentage}%`;
+                                
+                                if (percentage !== lastPercentage) {
+                                    lastPercentage = percentage;
+                                    progressBar.style.width = `${percentage}%`;
+                                    statusDiv.innerText = `Converting... ${percentage}%`;
+                
+                                    // Force Emscripten thread to pause and yield to the browser paint loop
+                                    if (typeof ffmpegCore._emscripten_sleep === 'function') {
+                                        ffmpegCore._emscripten_sleep(0);
+                                    }
+                                }
                             }
                         }
                     }
