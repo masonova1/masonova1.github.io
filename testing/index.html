@@ -70,6 +70,7 @@
 
     <!-- 1. INLINE WORKER SCRIPT -->
     <!-- 1. INLINE WORKER SCRIPT -->
+    <!-- INLINE WORKER SCRIPT -->
     <script id="workerCode" type="javascript/worker">
         const CORE_VERSION = '0.11.1';
         const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
@@ -81,16 +82,16 @@
         function parseTimeToSeconds(timeStr) {
             const parts = timeStr.split(':');
             if (parts.length !== 3) return 0;
-            return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parts[2]);
+            return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parseFloat(parts[2]));
         }
     
         function parseProgressLine(line) {
             if (currentTotalDuration <= 0) return;
     
-            // Parses "-progress pipe:2" key=value output
+            // Matches out_time=HH:MM:SS.microseconds from -progress pipe:2
             if (line.startsWith('out_time=')) {
                 const timeStr = line.split('=')[1]?.trim();
-                if (timeStr) {
+                if (timeStr && timeStr !== 'N/A') {
                     const currentSeconds = parseTimeToSeconds(timeStr);
                     const percentage = Math.min(100, Math.round((currentSeconds / currentTotalDuration) * 100));
                     self.postMessage({ type: 'progress', percentage });
@@ -107,13 +108,11 @@
             }
         }
     
-        function processChar(c) {
-            // Handle single character or numeric byte input from Emscripten TTY
-            const char = (typeof c === 'number') ? String.fromCharCode(c) : c;
-    
+        function handleChar(byte) {
+            const char = String.fromCharCode(byte);
             if (char === '\r' || char === '\n') {
-                if (stderrBuffer.length > 0) {
-                    parseProgressLine(stderrBuffer);
+                if (stderrBuffer.trim().length > 0) {
+                    parseProgressLine(stderrBuffer.trim());
                     stderrBuffer = "";
                 }
             } else {
@@ -135,22 +134,32 @@
                             return scriptDirectory + path;
                         },
                         stdin: () => null,
-                        print: (chunk) => { /* Ignore stdout */ },
-                        printErr: (text) => {
-                            // Fallback chunk printer if TTY hook isn't active
-                            if (typeof text === 'string') {
-                                for (let i = 0; i < text.length; i++) {
-                                    processChar(text[i]);
-                                }
-                            }
-                        }
+                        print: () => {},
+                        printErr: () => {}
                     });
     
-                    // Override Emscripten TTY put_char handler to bypass line buffering
-                    if (ffmpegCore.TTY && ffmpegCore.TTY.default_tty_ops) {
-                        ffmpegCore.TTY.default_tty_ops.put_char = (tty, val) => {
-                            processChar(val);
+                    // Intercept low-level FS writes to stdout/stderr (fd 1 & 2)
+                    // This captures raw C write() calls directly as WebAssembly executes
+                    if (ffmpegCore.FS && ffmpegCore.FS.streams) {
+                        const patchStream = (fd) => {
+                            const stream = ffmpegCore.FS.streams[fd];
+                            if (stream && stream.stream_ops) {
+                                const origWrite = stream.stream_ops.write;
+                                stream.stream_ops.write = (stream, buffer, offset, length, position) => {
+                                    for (let i = 0; i < length; i++) {
+                                        handleChar(buffer[offset + i]);
+                                    }
+                                    if (origWrite) {
+                                        return origWrite(stream, buffer, offset, length, position);
+                                    }
+                                    return length;
+                                };
+                            }
                         };
+    
+                        // Patch stdout (1) and stderr (2)
+                        patchStream(1);
+                        patchStream(2);
                     }
     
                     self.postMessage({ type: 'ready' });
@@ -172,7 +181,8 @@
                     const args = [
                         'ffmpeg',
                         '-y',
-                        '-progress', 'pipe:2', // Route machine-readable progress straight to stderr
+                        '-stats_period', '0.1', // Request progress output every 100ms
+                        '-progress', 'pipe:2',  // Write key-value pairs directly to stderr
                         '-i', inputName,
                         '-r', '30',
                         '-pix_fmt', 'yuv420p',
