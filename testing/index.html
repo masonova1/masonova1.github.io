@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TinyTV2 Online AVI Converter</title>
+    <title>TinyTV Converter</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
         .box { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fafafa; margin-top: 20px; }
@@ -35,31 +35,31 @@
 </head>
 <body>
 
-    <h2>TinyTV Online AVI converter</h2>
-    <p>Convert an <code>.mp4</code> video to TinyTV 2 <code>.avi</code>.</p>
+    <h2>TinyTV Converter</h2>
+    <p>Web application to convert most video formats to the specific TinyTV 2 compatible video format</p>
 
     <div class="box">
-        <div id="status">Loading worker and FFmpeg core...</div>
+        <div id="status">Loading converter application...</div>
         
         <input type="file" id="uploader" accept="video/mp4" disabled>
         
         <div class="options-group">
-            <strong>Aspect Ratio Scaling Option:</strong>
+            <strong>Video Scaling:</strong>
             <label>
                 <input type="radio" name="scaleMode" value="stretch" checked>
-                Fill / Stretch (scale=210:135)
+                Fill / Stretch (stretch video to fit TinyTV)
             </label>
             <label>
                 <input type="radio" name="scaleMode" value="crop">
-                Cover / Crop (Zoom to fill, trim overflow)
+                Cover / Zoom (keep aspect ratio and crop to fit TinyTV)
             </label>
             <label>
                 <input type="radio" name="scaleMode" value="letterbox">
-                Contain / Letterbox (Pad black bars)
+                Contain / Letterbox (keep aspect ratio and add padding to fit TinyTV)
             </label>
         </div>
 
-        <button id="convertBtn" disabled>Convert MP4 to AVI</button>
+        <button id="convertBtn" disabled>Start Conversion</button>
         
         <div id="progressContainer" class="progress-container">
             <div id="progressBar" class="progress-bar"></div>
@@ -283,7 +283,7 @@
                 const { type, percentage, outputBuffer, error } = e.data;
 
                 if (type === 'ready') {
-                    statusDiv.innerText = "FFmpeg Worker Ready! Select an MP4 file.";
+                    statusDiv.innerText = "Ready! Select a video file:";
                     uploader.disabled = false;
                 }
 
@@ -304,7 +304,7 @@
                     downloadLink.href = url;
                     downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".avi";
                     downloadLink.id = "downloadLink";
-                    downloadLink.innerText = "Download Converted AVI";
+                    downloadLink.innerText = "Save Converted Video";
 
                     outputArea.appendChild(downloadLink);
 
