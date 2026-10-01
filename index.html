@@ -12,9 +12,6 @@
         #status { font-weight: bold; color: #555; margin: 10px 0; }
         #downloadLink { display: inline-block; margin-top: 15px; background: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
     </style>
-    
-    <!-- Load v0.11.x bundle -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 </head>
 <body>
 
@@ -31,8 +28,9 @@
         <div id="outputArea"></div>
     </div>
 
-    <script>
-        const { createFFmpeg, fetchFile } = FFmpeg;
+    <script type="module">
+        import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+        import { fetchFile, toBlobURL } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
         let ffmpeg = null;
         const uploader = document.getElementById('uploader');
@@ -40,37 +38,56 @@
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
 
+        // Dynamically fetch worker script and wrap as inline Blob to prevent CORS origin blocking
+        async function createInlineWorkerURL(url) {
+            const response = await fetch(url);
+            const content = await response.text();
+            // Inject self.location so relative imports resolve to CDN origin
+            const modified = `self.baseURL = "${url.substring(0, url.lastIndexOf('/'))}/";\n` + content;
+            const blob = new Blob([modified], { type: 'text/javascript' });
+            return URL.createObjectURL(blob);
+        }
+
         async function initFFmpeg() {
             try {
                 console.log("Creating FFmpeg instance...");
+                ffmpeg = new FFmpeg();
                 
-                // CRITICAL: Explicitly use @ffmpeg/core-st for single-threaded build
-                ffmpeg = createFFmpeg({
-                    log: true,
-                    corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js'
-                });
-
-                ffmpeg.setLogger(({ message }) => {
+                ffmpeg.on('log', ({ message }) => {
                     console.log(message);
                     if (message.includes('size=')) {
                         statusDiv.innerText = "Processing conversion chunks...";
                     }
                 });
 
-                console.log("Loading FFmpeg engine...");
-                await ffmpeg.load();
+                const coreBaseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+                const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm';
 
-                console.log("FFmpeg loaded successfully!");
+                console.log("Fetching core WASM & JS components...");
+                const coreURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.js`, 'text/javascript');
+                const wasmURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.wasm`, 'application/wasm');
+                
+                // Fetch worker bundle and create local blob worker
+                const classWorkerURL = await createInlineWorkerURL(`${ffmpegBaseURL}/worker.js`);
+
+                console.log("Loading FFmpeg into engine...");
+                await ffmpeg.load({
+                    coreURL,
+                    wasmURL,
+                    classWorkerURL
+                });
+
+                console.log("FFmpeg successfully loaded!");
                 statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
                 uploader.disabled = false;
             } catch (error) {
                 console.error("FFmpeg Load Error:", error);
-                statusDiv.innerText = "Failed to load single-threaded FFmpeg. Check browser console for details.";
+                statusDiv.innerText = "Failed to load single-threaded FFmpeg. Check console for details.";
             }
         }
 
         uploader.addEventListener('change', () => {
-            if (uploader.files.length > 0 && ffmpeg && ffmpeg.isLoaded()) {
+            if (uploader.files.length > 0 && ffmpeg && ffmpeg.loaded) {
                 convertBtn.disabled = false;
             }
         });
@@ -89,15 +106,10 @@
             const outputName = 'output.mp3';
 
             try {
-                // Write input file to virtual filesystem
-                ffmpeg.FS('writeFile', inputName, await fetchFile(file));
+                await ffmpeg.writeFile(inputName, await fetchFile(file));
+                await ffmpeg.exec(['-i', inputName, '-q:a', '0', '-map', 'a', outputName]);
 
-                // Execute transcoding command
-                await ffmpeg.run('-i', inputName, '-q:a', '0', '-map', 'a', outputName);
-
-                // Read output binary array
-                const data = ffmpeg.FS('readFile', outputName);
-
+                const data = await ffmpeg.readFile(outputName);
                 const blob = new Blob([data.buffer], { type: 'audio/mp3' });
                 const url = URL.createObjectURL(blob);
 
