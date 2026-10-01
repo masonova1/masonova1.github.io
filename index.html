@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Single-Threaded ffmpeg.wasm Converter</title>
+    <title>Single-Threaded FFmpeg Direct Engine</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
         .box { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fafafa; margin-top: 20px; }
@@ -15,8 +15,8 @@
 </head>
 <body>
 
-    <h2>Single-Threaded ffmpeg.wasm Converter</h2>
-    <p>Convert an <code>.mp4</code> video to an <code>.mp3</code> audio entirely client-side without special security headers.</p>
+    <h2>Single-Threaded FFmpeg Converter</h2>
+    <p>Convert an <code>.mp4</code> video to an <code>.mp3</code> audio entirely client-side on standard GitHub Pages.</p>
 
     <div class="box">
         <div id="status">Loading FFmpeg core components...</div>
@@ -28,66 +28,60 @@
         <div id="outputArea"></div>
     </div>
 
-    <script type="module">
-        import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
-        import { fetchFile, toBlobURL } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
+    <script>
+        const CORE_VERSION = '0.11.1';
+        const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
 
-        let ffmpeg = null;
+        let ffmpegCore = null;
         const uploader = document.getElementById('uploader');
         const convertBtn = document.getElementById('convertBtn');
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
 
-        // Dynamically fetch worker script and wrap as inline Blob to prevent CORS origin blocking
-        async function createInlineWorkerURL(url) {
-            const response = await fetch(url);
-            const content = await response.text();
-            // Inject self.location so relative imports resolve to CDN origin
-            const modified = `self.baseURL = "${url.substring(0, url.lastIndexOf('/'))}/";\n` + content;
-            const blob = new Blob([modified], { type: 'text/javascript' });
-            return URL.createObjectURL(blob);
+        // Dynamically load the single-threaded standalone JS runtime
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = resolve;
+                script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+                document.head.appendChild(script);
+            });
         }
 
         async function initFFmpeg() {
             try {
-                console.log("Creating FFmpeg instance...");
-                ffmpeg = new FFmpeg();
-                
-                ffmpeg.on('log', ({ message }) => {
-                    console.log(message);
-                    if (message.includes('size=')) {
-                        statusDiv.innerText = "Processing conversion chunks...";
+                statusDiv.innerText = "Fetching single-threaded FFmpeg core...";
+                console.log("Loading ffmpeg-core.js directly...");
+
+                await loadScript(`${CDN_BASE}/ffmpeg-core.js`);
+
+                statusDiv.innerText = "Initializing WebAssembly module...";
+                console.log("Instantiating FFmpegModule...");
+
+                // Create Emscripten module directly on the main thread
+                ffmpegCore = await createFFmpegCore({
+                    mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
+                    print: (text) => console.log("[FFmpeg stdout]:", text),
+                    printErr: (text) => {
+                        console.log("[FFmpeg stderr]:", text);
+                        if (text.includes('size=')) {
+                            statusDiv.innerText = "Processing conversion chunks...";
+                        }
                     }
                 });
 
-                const coreBaseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-                const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm';
-
-                console.log("Fetching core WASM & JS components...");
-                const coreURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.js`, 'text/javascript');
-                const wasmURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.wasm`, 'application/wasm');
-                
-                // Fetch worker bundle and create local blob worker
-                const classWorkerURL = await createInlineWorkerURL(`${ffmpegBaseURL}/worker.js`);
-
-                console.log("Loading FFmpeg into engine...");
-                await ffmpeg.load({
-                    coreURL,
-                    wasmURL,
-                    classWorkerURL
-                });
-
-                console.log("FFmpeg successfully loaded!");
+                console.log("FFmpeg core initialized successfully!");
                 statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
                 uploader.disabled = false;
             } catch (error) {
-                console.error("FFmpeg Load Error:", error);
-                statusDiv.innerText = "Failed to load single-threaded FFmpeg. Check console for details.";
+                console.error("FFmpeg Direct Load Error:", error);
+                statusDiv.innerText = "Failed to load FFmpeg. Check browser console.";
             }
         }
 
         uploader.addEventListener('change', () => {
-            if (uploader.files.length > 0 && ffmpeg && ffmpeg.loaded) {
+            if (uploader.files.length > 0 && ffmpegCore) {
                 convertBtn.disabled = false;
             }
         });
@@ -106,11 +100,32 @@
             const outputName = 'output.mp3';
 
             try {
-                await ffmpeg.writeFile(inputName, await fetchFile(file));
-                await ffmpeg.exec(['-i', inputName, '-q:a', '0', '-map', 'a', outputName]);
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
 
-                const data = await ffmpeg.readFile(outputName);
-                const blob = new Blob([data.buffer], { type: 'audio/mp3' });
+                // Write file directly to Emscripten Virtual File System (MEMFS)
+                ffmpegCore.FS.writeFile(inputName, uint8Array);
+
+                // Convert JS string args to C-style pointers for main() execution
+                const args = ['ffmpeg', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
+                const argc = args.length;
+                const argv = ffmpegCore._malloc(argc * 4);
+
+                for (let i = 0; i < argc; i++) {
+                    const argPtr = ffmpegCore._malloc(args[i].length + 1);
+                    ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
+                    ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
+                }
+
+                // Execute FFmpeg entrypoint directly
+                console.log("Executing FFmpeg CLI command...");
+                ffmpegCore._main(argc, argv);
+
+                // Read output file from virtual filesystem
+                const outputData = ffmpegCore.FS.readFile(outputName);
+
+                // Create download link
+                const blob = new Blob([outputData.buffer], { type: 'audio/mp3' });
                 const url = URL.createObjectURL(blob);
 
                 const downloadLink = document.createElement('a');
@@ -118,11 +133,15 @@
                 downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
                 downloadLink.id = "downloadLink";
                 downloadLink.innerText = "Download Converted MP3";
-                
+
                 outputArea.appendChild(downloadLink);
                 statusDiv.innerText = "Conversion Complete!";
+
+                // Clean up MEMFS files
+                ffmpegCore.FS.unlink(inputName);
+                ffmpegCore.FS.unlink(outputName);
             } catch (err) {
-                console.error(err);
+                console.error("Transcoding Error:", err);
                 statusDiv.innerText = "An error occurred during transcoding.";
             } finally {
                 uploader.disabled = false;
