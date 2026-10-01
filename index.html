@@ -13,7 +13,7 @@
         #downloadLink { display: inline-block; margin-top: 15px; background: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
     </style>
     
-    <!-- Load stable single-threaded v0.11.x build -->
+    <!-- Load v0.11.x bundle -->
     <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 </head>
 <body>
@@ -44,10 +44,10 @@
             try {
                 console.log("Creating FFmpeg instance...");
                 
-                // Point explicitly to the single-threaded core
+                // CRITICAL: Explicitly use @ffmpeg/core-st for single-threaded build
                 ffmpeg = createFFmpeg({
                     log: true,
-                    corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+                    corePath: 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js'
                 });
 
                 ffmpeg.setLogger(({ message }) => {
@@ -89,13 +89,13 @@
             const outputName = 'output.mp3';
 
             try {
-                // Write input file to in-memory Emscripten virtual file system
+                // Write input file to virtual filesystem
                 ffmpeg.FS('writeFile', inputName, await fetchFile(file));
 
-                // Run transcoding command
+                // Execute transcoding command
                 await ffmpeg.run('-i', inputName, '-q:a', '0', '-map', 'a', outputName);
 
-                // Read result back out of virtual memory
+                // Read output binary array
                 const data = ffmpeg.FS('readFile', outputName);
 
                 const blob = new Blob([data.buffer], { type: 'audio/mp3' });
