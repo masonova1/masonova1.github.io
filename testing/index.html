@@ -35,8 +35,8 @@
 </head>
 <body>
 
-    <h2>Single-Threaded FFmpeg Converter</h2>
-    <p>Convert an <code>.mp4</code> video to TinyTV <code>.avi</code> video entirely client-side on standard GitHub Pages.</p>
+    <h2>TinyTV Online AVI converter</h2>
+    <p>Convert an <code>.mp4</code> video to TinyTV 2 <code>.avi</code>.</p>
 
     <div class="box">
         <div id="status">Loading worker and FFmpeg core...</div>
@@ -74,6 +74,8 @@
         const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
 
         let ffmpegCore = null;
+        let currentTotalDuration = 0;
+        let stderrBuffer = "";
 
         function parseTimeToSeconds(timeStr) {
             const parts = timeStr.split(':');
@@ -81,15 +83,45 @@
             return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parts[2]);
         }
 
+        function parseProgressLine(line) {
+            if (currentTotalDuration <= 0) return;
+
+            // Handle -progress key=value lines
+            if (line.startsWith('out_time=')) {
+                const timeStr = line.split('=')[1]?.trim();
+                if (timeStr) {
+                    const currentSeconds = parseTimeToSeconds(timeStr);
+                    const percentage = Math.min(100, Math.round((currentSeconds / currentTotalDuration) * 100));
+                    self.postMessage({ type: 'progress', percentage });
+                }
+            } 
+            // Fallback for standard FFmpeg stderr status lines
+            else if (line.includes('time=')) {
+                const match = line.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
+                if (match && match[1]) {
+                    const currentSeconds = parseTimeToSeconds(match[1]);
+                    const percentage = Math.min(100, Math.round((currentSeconds / currentTotalDuration) * 100));
+                    self.postMessage({ type: 'progress', percentage });
+                }
+            }
+        }
+
+        function handleOutputChunk(chunk) {
+            stderrBuffer += chunk;
+            const lines = stderrBuffer.split(/[\r\n]+/);
+            stderrBuffer = lines.pop(); // Retain partial segment
+
+            for (const line of lines) {
+                parseProgressLine(line);
+            }
+        }
+
         self.onmessage = async (e) => {
             const { action, fileData, vfFilter, inputName, outputName, totalDurationSeconds } = e.data;
 
             if (action === 'init') {
                 try {
-                    // Import FFmpeg Core in worker scope
                     importScripts(`${CDN_BASE}/ffmpeg-core.js`);
-
-                    let stderrBuffer = "";
 
                     ffmpegCore = await createFFmpegCore({
                         mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
@@ -98,36 +130,9 @@
                             return scriptDirectory + path;
                         },
                         stdin: () => null,
-                        print: (text) => console.log("[FFmpeg stdout]:", text),
-                        printErr: (chunk) => {
-                            console.log("[FFmpeg stderr]:", chunk);
-        
-                            // Emscripten may pass chunks, single chars, or whole lines
-                            stderrBuffer += chunk;
-                            
-                            // Split on both carriage returns and newlines
-                            const lines = stderrBuffer.split(/[\r\n]+/);
-                            
-                            // Keep the last partial segment in the buffer
-                            stderrBuffer = lines.pop();
-                    
-                            for (const line of lines) {
-                                parseProgress(line);
-                            }
-                        }
+                        print: (chunk) => handleOutputChunk(chunk),
+                        printErr: (chunk) => handleOutputChunk(chunk)
                     });
-                    
-                    function parseProgress(text) {
-                        if (totalDurationSeconds > 0 && text.includes('time=')) {
-                            // Extract time=HH:MM:SS.ss
-                            const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
-                            if (match && match[1]) {
-                                const currentSeconds = parseTimeToSeconds(match[1]);
-                                const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
-                                self.postMessage({ type: 'progress', percentage });
-                            }
-                        }
-                    }
 
                     self.postMessage({ type: 'ready' });
                 } catch (err) {
@@ -139,6 +144,8 @@
             if (action === 'convert') {
                 let argv = 0;
                 let argPointers = [];
+                currentTotalDuration = totalDurationSeconds || 0;
+                stderrBuffer = "";
 
                 try {
                     ffmpegCore.FS.writeFile(inputName, new Uint8Array(fileData));
@@ -179,7 +186,7 @@
                     }
 
                     const outputData = ffmpegCore.FS.readFile(outputName);
-                    
+
                     // Clean virtual file system
                     ffmpegCore.FS.unlink(inputName);
                     ffmpegCore.FS.unlink(outputName);
@@ -227,7 +234,6 @@
         }
 
         function initInlineWorker() {
-            // Instantiate Worker from inline <script id="workerCode">
             const workerBlob = new Blob([document.getElementById('workerCode').textContent], { type: 'text/javascript' });
             const workerUrl = URL.createObjectURL(workerBlob);
             worker = new Worker(workerUrl);
@@ -241,7 +247,6 @@
                 }
 
                 if (type === 'progress') {
-                    // Main UI thread is totally free, so DOM updates trigger smoothly
                     progressBar.style.width = `${percentage}%`;
                     statusDiv.innerText = `Converting... ${percentage}%`;
                 }
@@ -274,7 +279,6 @@
                 }
             };
 
-            // Start initialization inside the worker thread
             worker.postMessage({ action: 'init' });
         }
 
@@ -316,7 +320,6 @@
 
             const arrayBuffer = await file.arrayBuffer();
 
-            // Post transcoding payload to worker, zero-copy transferring ArrayBuffer
             worker.postMessage({
                 action: 'convert',
                 fileData: arrayBuffer,
