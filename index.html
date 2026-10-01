@@ -29,7 +29,6 @@
     </div>
 
     <script type="module">
-        console.log("Importing modules...");
         import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
         import { fetchFile, toBlobURL } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
@@ -39,13 +38,19 @@
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
 
-        // Initialize single-threaded FFmpeg
+        // Helper to load cross-origin worker script without origin hangs
+        async function getWorkerBlobURL(url) {
+            const res = await fetch(url);
+            const content = await res.text();
+            const blob = new Blob([content], { type: 'text/javascript' });
+            return URL.createObjectURL(blob);
+        }
+
         async function initFFmpeg() {
             try {
-                console.log("Creating FFMPEG object...");
+                console.log("Creating FFmpeg instance...");
                 ffmpeg = new FFmpeg();
                 
-                // Monitor log streams
                 ffmpeg.on('log', ({ message }) => {
                     console.log(message);
                     if (message.includes('size=')) {
@@ -56,36 +61,33 @@
                 const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
                 const ffmpegURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm';
 
-                console.log("Blobbing URLs for web workers...");
-                // Convert remote assets into Blob URLs to bypass CORS Web Worker origin restrictions
+                console.log("Fetching core & worker assets...");
                 const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
                 const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
-                const classWorkerURL = await toBlobURL(`${ffmpegURL}/worker.js`, 'text/javascript');
-                console.log("Loading FFmpeg...");
+                const classWorkerURL = await getWorkerBlobURL(`${ffmpegURL}/worker.js`);
+
+                console.log("Loading FFmpeg into worker...");
                 await ffmpeg.load({
                     coreURL,
                     wasmURL,
                     classWorkerURL
                 });
 
-                console.log("FFmpeg loaded!");
-                
+                console.log("FFmpeg loaded successfully!");
                 statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
                 uploader.disabled = false;
             } catch (error) {
-                console.error(error);
-                statusDiv.innerText = "Failed to load single-threaded FFmpeg. Try reloading the page.";
+                console.error("FFmpeg Load Error:", error);
+                statusDiv.innerText = "Failed to load single-threaded FFmpeg. Check console for details.";
             }
         }
 
-        // Enable button when file is selected
         uploader.addEventListener('change', () => {
             if (uploader.files.length > 0 && ffmpeg && ffmpeg.loaded) {
                 convertBtn.disabled = false;
             }
         });
 
-        // Run the Fixed Conversion Command
         convertBtn.addEventListener('click', async () => {
             const files = uploader.files;
             if (!files || files.length === 0) return;
@@ -93,27 +95,20 @@
 
             convertBtn.disabled = true;
             uploader.disabled = true;
-            statusDiv.innerText = "Converting... Note: Browser UI may lag briefly during single-thread processing.";
+            statusDiv.innerText = "Converting... Please wait.";
             outputArea.innerHTML = "";
 
             const inputName = 'input.mp4';
             const outputName = 'output.mp3';
 
             try {
-                // Write user's uploaded binary data into the virtual filesystem
                 await ffmpeg.writeFile(inputName, await fetchFile(file));
-
-                // Execute fixed FFmpeg command mapping: isolate the audio stream into an MP3
                 await ffmpeg.exec(['-i', inputName, '-q:a', '0', '-map', 'a', outputName]);
 
-                // Pull the compiled raw output array out of WebAssembly memory
                 const data = await ffmpeg.readFile(outputName);
-
-                // Create a browser downloadable blob asset
                 const blob = new Blob([data.buffer], { type: 'audio/mp3' });
                 const url = URL.createObjectURL(blob);
 
-                // Append the live download anchor
                 const downloadLink = document.createElement('a');
                 downloadLink.href = url;
                 downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
@@ -131,7 +126,6 @@
             }
         });
 
-        // Auto-run core initialization
         initFFmpeg();
     </script>
 </body>
