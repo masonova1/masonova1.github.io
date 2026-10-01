@@ -91,6 +91,12 @@
 
                     ffmpegCore = await createFFmpegCore({
                         mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
+                        locateFile: (path, scriptDirectory) => {
+                            if (path.endsWith('.wasm')) {
+                                return `${CDN_BASE}/${path}`;
+                            }
+                            return scriptDirectory + path;
+                        },
                         stdin: () => null,
                         print: (text) => console.log("[FFmpeg stdout]:", text),
                         printErr: (text) => {
