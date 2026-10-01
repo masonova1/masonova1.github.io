@@ -38,7 +38,6 @@
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
 
-        // Dynamically load the single-threaded standalone JS runtime
         function loadScript(src) {
             return new Promise((resolve, reject) => {
                 const script = document.createElement('script');
@@ -62,6 +61,10 @@
                 // Create Emscripten module directly on the main thread
                 ffmpegCore = await createFFmpegCore({
                     mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
+                    
+                    // Override default Emscripten stdin handler
+                    stdin: () => null,
+
                     print: (text) => console.log("[FFmpeg stdout]:", text),
                     printErr: (text) => {
                         console.log("[FFmpeg stderr]:", text);
@@ -107,7 +110,7 @@
                 ffmpegCore.FS.writeFile(inputName, uint8Array);
 
                 // Convert JS string args to C-style pointers for main() execution
-                const args = ['ffmpeg', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
+                const args = ['ffmpeg', '-y', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
                 const argc = args.length;
                 const argv = ffmpegCore._malloc(argc * 4);
 
