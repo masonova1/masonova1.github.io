@@ -28,16 +28,20 @@
         <div id="outputArea"></div>
     </div>
 
-    <!-- Notice type="module" which allows clean, safe CDN imports -->
     <script type="module">
-        import { FFmpeg } from 'https://jsdelivr.net';
-        import { fetchFile } from 'https://jsdelivr.net';
+        import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+        import { fetchFile } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
 
         let ffmpeg = null;
         const uploader = document.getElementById('uploader');
         const convertBtn = document.getElementById('convertBtn');
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
+
+        // Verify that FFmpeg loaded properly
+        function verifyFFmpegLoaded() {
+            return ffmpeg && ffmpeg.loaded;
+        }
 
         // Initialize single-threaded FFmpeg
         async function initFFmpeg() {
@@ -47,20 +51,26 @@
                 // Monitor log streams
                 ffmpeg.on('log', ({ message }) => {
                     console.log(message);
-                    if(message.includes('size=')) {
+                    if (message.includes('size=')) {
                         statusDiv.innerText = "Processing conversion chunks...";
                     }
                 });
 
-                // Point explicitly to the single-threaded build core
-                const baseURL = 'https://unpkg.com';
+                // Point explicitly to single-threaded core (version pinned)
+                const coreVersion = '0.12.6';
+                const baseURL = `https://unpkg.com/@ffmpeg/core@${coreVersion}/dist/esm`;
+                
                 await ffmpeg.load({
                     coreURL: `${baseURL}/ffmpeg-core.js`,
                     wasmURL: `${baseURL}/ffmpeg-core.wasm`
                 });
 
-                statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
-                uploader.disabled = false;
+                if (verifyFFmpegLoaded()) {
+                    statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
+                    uploader.disabled = false;
+                } else {
+                    throw new Error("FFmpeg load failed.");
+                }
             } catch (error) {
                 console.error(error);
                 statusDiv.innerText = "Failed to load single-threaded FFmpeg. Try reloading the page.";
@@ -69,7 +79,7 @@
 
         // Enable button when file is selected
         uploader.addEventListener('change', () => {
-            if (uploader.files.length > 0) {
+            if (uploader.files.length > 0 && verifyFFmpegLoaded()) {
                 convertBtn.disabled = false;
             }
         });
@@ -105,7 +115,7 @@
                 // Append the live download anchor
                 const downloadLink = document.createElement('a');
                 downloadLink.href = url;
-                downloadLink.download = file.name.replace(/\.[^/.]+\$/, "") + ".mp3";
+                downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
                 downloadLink.id = "downloadLink";
                 downloadLink.innerText = "Download Converted MP3";
                 
