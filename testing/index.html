@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Single-Threaded FFmpeg Direct Engine</title>
+    <title>TinyTV2 Online AVI Converter</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
         .box { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fafafa; margin-top: 20px; }
@@ -68,8 +68,6 @@
         <div id="outputArea"></div>
     </div>
 
-    <!-- 1. INLINE WORKER SCRIPT -->
-    <!-- 1. INLINE WORKER SCRIPT -->
     <!-- INLINE WORKER SCRIPT -->
     <script id="workerCode" type="javascript/worker">
         const CORE_VERSION = '0.11.1';
@@ -82,7 +80,7 @@
         function parseTimeToSeconds(timeStr) {
             const parts = timeStr.split(':');
             if (parts.length !== 3) return 0;
-            return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parseFloat(parts[2]));
+            return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parts[2]);
         }
     
         function parseProgressLine(line) {
@@ -109,7 +107,7 @@
         }
     
         function handleChar(byte) {
-            const char = String.fromCharCode(byte);
+            const char = (typeof byte === 'number') ? String.fromCharCode(byte) : byte;
             if (char === '\r' || char === '\n') {
                 if (stderrBuffer.trim().length > 0) {
                     parseProgressLine(stderrBuffer.trim());
@@ -135,31 +133,26 @@
                         },
                         stdin: () => null,
                         print: () => {},
-                        printErr: () => {}
+                        printErr: (text) => {
+                            // High-level fallback for text chunks
+                            if (typeof text === 'string') {
+                                for (let i = 0; i < text.length; i++) {
+                                    handleChar(text[i]);
+                                }
+                                handleChar('\n');
+                            }
+                        }
                     });
     
-                    // Intercept low-level FS writes to stdout/stderr (fd 1 & 2)
-                    // This captures raw C write() calls directly as WebAssembly executes
-                    if (ffmpegCore.FS && ffmpegCore.FS.streams) {
-                        const patchStream = (fd) => {
-                            const stream = ffmpegCore.FS.streams[fd];
-                            if (stream && stream.stream_ops) {
-                                const origWrite = stream.stream_ops.write;
-                                stream.stream_ops.write = (stream, buffer, offset, length, position) => {
-                                    for (let i = 0; i < length; i++) {
-                                        handleChar(buffer[offset + i]);
-                                    }
-                                    if (origWrite) {
-                                        return origWrite(stream, buffer, offset, length, position);
-                                    }
-                                    return length;
-                                };
+                    // Attach low-level output interceptor directly to standard output/error TTY devices
+                    if (ffmpegCore.TTY && ffmpegCore.TTY.stream_ops) {
+                        const originalPutChar = ffmpegCore.TTY.stream_ops.put_char;
+                        ffmpegCore.TTY.stream_ops.put_char = (tty, val) => {
+                            handleChar(val);
+                            if (originalPutChar) {
+                                try { originalPutChar(tty, val); } catch (_) {}
                             }
                         };
-    
-                        // Patch stdout (1) and stderr (2)
-                        patchStream(1);
-                        patchStream(2);
                     }
     
                     self.postMessage({ type: 'ready' });
@@ -181,8 +174,7 @@
                     const args = [
                         'ffmpeg',
                         '-y',
-                        '-stats_period', '0.1', // Request progress output every 100ms
-                        '-progress', 'pipe:2',  // Write key-value pairs directly to stderr
+                        '-progress', 'pipe:2',  // Write key-value progress pairs to stderr
                         '-i', inputName,
                         '-r', '30',
                         '-pix_fmt', 'yuv420p',
@@ -209,7 +201,10 @@
                     try {
                         ffmpegCore._main(argc, argv);
                     } catch (err) {
-                        if (err.name !== 'ExitStatus' || err.status !== 0) {
+                        // ExitStatus 0 represents normal FFmpeg exit (main returned 0)
+                        if (err.name === 'ExitStatus' && err.status === 0) {
+                            // Successful run
+                        } else {
                             throw err;
                         }
                     }
