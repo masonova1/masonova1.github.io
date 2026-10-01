@@ -14,6 +14,23 @@
         .options-group { margin: 15px 0; padding: 10px 0; border-top: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; }
         .options-group label { display: block; margin: 6px 0; cursor: pointer; }
         .options-group input[type="radio"] { margin-right: 8px; }
+
+        /* Progress Bar Styles */
+        .progress-container {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 6px;
+            overflow: hidden;
+            height: 20px;
+            margin-top: 12px;
+            display: none;
+        }
+        .progress-bar {
+            width: 0%;
+            height: 100%;
+            background-color: #0076ff;
+            transition: width 0.2s ease-in-out;
+        }
     </style>
 </head>
 <body>
@@ -44,6 +61,10 @@
 
         <button id="convertBtn" disabled>Convert MP4 to AVI</button>
         
+        <div id="progressContainer" class="progress-container">
+            <div id="progressBar" class="progress-bar"></div>
+        </div>
+
         <div id="outputArea"></div>
     </div>
 
@@ -52,10 +73,14 @@
         const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
 
         let ffmpegCore = null;
+        let totalDurationSeconds = 0;
+
         const uploader = document.getElementById('uploader');
         const convertBtn = document.getElementById('convertBtn');
         const statusDiv = document.getElementById('status');
         const outputArea = document.getElementById('outputArea');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
 
         function loadScript(src) {
             return new Promise((resolve, reject) => {
@@ -64,6 +89,30 @@
                 script.onload = resolve;
                 script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
                 document.head.appendChild(script);
+            });
+        }
+
+        // Helper to convert "HH:MM:SS.ms" strings to total seconds
+        function parseTimeToSeconds(timeStr) {
+            const parts = timeStr.split(':');
+            if (parts.length !== 3) return 0;
+            const hours = parseFloat(parts[0]);
+            const minutes = parseFloat(parts[1]);
+            const seconds = parseFloat(parts[2]);
+            return (hours * 3600) + (minutes * 60) + seconds;
+        }
+
+        // Helper to parse duration directly from input video file via standard HTML5 Video element
+        function getVideoDuration(file) {
+            return new Promise((resolve) => {
+                const video = document.createElement('video');
+                video.preload = 'metadata';
+                video.onloadedmetadata = () => {
+                    URL.revokeObjectURL(video.src);
+                    resolve(video.duration || 0);
+                };
+                video.onerror = () => resolve(0);
+                video.src = URL.createObjectURL(file);
             });
         }
 
@@ -77,18 +126,22 @@
                 statusDiv.innerText = "Initializing WebAssembly module...";
                 console.log("Instantiating FFmpegModule...");
 
-                // Create Emscripten module directly on the main thread
                 ffmpegCore = await createFFmpegCore({
                     mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
-                    
-                    // Override default Emscripten stdin handler
                     stdin: () => null,
-
                     print: (text) => console.log("[FFmpeg stdout]:", text),
                     printErr: (text) => {
                         console.log("[FFmpeg stderr]:", text);
-                        if (text.includes('size=')) {
-                            statusDiv.innerText = "Processing conversion chunks...";
+
+                        // Parse standard FFmpeg progress output: time=HH:MM:SS.ms
+                        if (totalDurationSeconds > 0 && text.includes('time=')) {
+                            const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
+                            if (match && match[1]) {
+                                const currentSeconds = parseTimeToSeconds(match[1]);
+                                const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
+                                progressBar.style.width = `${percentage}%`;
+                                statusDiv.innerText = `Converting... ${percentage}%`;
+                            }
                         }
                     }
                 });
@@ -113,7 +166,17 @@
             if (!files || files.length === 0) return;
             const file = files[0];
 
-            // Determine selected video filter scale string
+            // Extract total video duration for accurate progress tracking
+            totalDurationSeconds = await getVideoDuration(file);
+
+            // Reset UI state
+            progressBar.style.width = '0%';
+            progressContainer.style.display = 'block';
+            convertBtn.disabled = true;
+            uploader.disabled = true;
+            statusDiv.innerText = "Preparing conversion...";
+            outputArea.innerHTML = "";
+
             const selectedMode = document.querySelector('input[name="scaleMode"]:checked').value;
             let vfFilter = '';
 
@@ -130,11 +193,6 @@
                     break;
             }
 
-            convertBtn.disabled = true;
-            uploader.disabled = true;
-            statusDiv.innerText = "Converting... Please wait.";
-            outputArea.innerHTML = "";
-
             const inputName = 'input.mp4';
             const outputName = 'output.avi';
 
@@ -145,7 +203,6 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const uint8Array = new Uint8Array(arrayBuffer);
 
-                // Write file directly to Emscripten Virtual File System (MEMFS)
                 ffmpegCore.FS.writeFile(inputName, uint8Array);
 
                 const args = [
@@ -186,10 +243,10 @@
                     }
                 }
 
-                // Read output file from virtual filesystem
-                const outputData = ffmpegCore.FS.readFile(outputName);
+                // Force completion status bar state
+                progressBar.style.width = '100%';
 
-                // Create download link
+                const outputData = ffmpegCore.FS.readFile(outputName);
                 const blob = new Blob([outputData.buffer], { type: 'video/avi' });
                 const url = URL.createObjectURL(blob);
 
@@ -202,14 +259,12 @@
                 outputArea.appendChild(downloadLink);
                 statusDiv.innerText = "Conversion Complete!";
 
-                // Clean up MEMFS virtual files
                 ffmpegCore.FS.unlink(inputName);
                 ffmpegCore.FS.unlink(outputName);
             } catch (err) {
                 console.error("Transcoding Error:", err);
                 statusDiv.innerText = "An error occurred during transcoding.";
             } finally {
-                // Free heap memory allocated for CLI argument string pointers
                 for (const ptr of argPointers) {
                     ffmpegCore._free(ptr);
                 }
