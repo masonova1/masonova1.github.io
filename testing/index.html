@@ -69,24 +69,25 @@
     </div>
 
     <!-- 1. INLINE WORKER SCRIPT -->
+    <!-- 1. INLINE WORKER SCRIPT -->
     <script id="workerCode" type="javascript/worker">
         const CORE_VERSION = '0.11.1';
         const CDN_BASE = `https://unpkg.com/@ffmpeg/core-st@${CORE_VERSION}/dist`;
-
+    
         let ffmpegCore = null;
         let currentTotalDuration = 0;
         let stderrBuffer = "";
-
+    
         function parseTimeToSeconds(timeStr) {
             const parts = timeStr.split(':');
             if (parts.length !== 3) return 0;
             return (parseFloat(parts[0]) * 3600) + (parseFloat(parts[1]) * 60) + parseFloat(parts[2]);
         }
-
+    
         function parseProgressLine(line) {
             if (currentTotalDuration <= 0) return;
-
-            // Handle -progress key=value lines
+    
+            // Parses "-progress pipe:2" key=value output
             if (line.startsWith('out_time=')) {
                 const timeStr = line.split('=')[1]?.trim();
                 if (timeStr) {
@@ -95,7 +96,7 @@
                     self.postMessage({ type: 'progress', percentage });
                 }
             } 
-            // Fallback for standard FFmpeg stderr status lines
+            // Fallback for standard FFmpeg status line (time=HH:MM:SS.ss)
             else if (line.includes('time=')) {
                 const match = line.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
                 if (match && match[1]) {
@@ -105,24 +106,28 @@
                 }
             }
         }
-
-        function handleOutputChunk(chunk) {
-            stderrBuffer += chunk;
-            const lines = stderrBuffer.split(/[\r\n]+/);
-            stderrBuffer = lines.pop(); // Retain partial segment
-
-            for (const line of lines) {
-                parseProgressLine(line);
+    
+        function processChar(c) {
+            // Handle single character or numeric byte input from Emscripten TTY
+            const char = (typeof c === 'number') ? String.fromCharCode(c) : c;
+    
+            if (char === '\r' || char === '\n') {
+                if (stderrBuffer.length > 0) {
+                    parseProgressLine(stderrBuffer);
+                    stderrBuffer = "";
+                }
+            } else {
+                stderrBuffer += char;
             }
         }
-
+    
         self.onmessage = async (e) => {
             const { action, fileData, vfFilter, inputName, outputName, totalDurationSeconds } = e.data;
-
+    
             if (action === 'init') {
                 try {
                     importScripts(`${CDN_BASE}/ffmpeg-core.js`);
-
+    
                     ffmpegCore = await createFFmpegCore({
                         mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
                         locateFile: (path, scriptDirectory) => {
@@ -130,30 +135,44 @@
                             return scriptDirectory + path;
                         },
                         stdin: () => null,
-                        print: (chunk) => handleOutputChunk(chunk),
-                        printErr: (chunk) => handleOutputChunk(chunk)
+                        print: (chunk) => { /* Ignore stdout */ },
+                        printErr: (text) => {
+                            // Fallback chunk printer if TTY hook isn't active
+                            if (typeof text === 'string') {
+                                for (let i = 0; i < text.length; i++) {
+                                    processChar(text[i]);
+                                }
+                            }
+                        }
                     });
-
+    
+                    // Override Emscripten TTY put_char handler to bypass line buffering
+                    if (ffmpegCore.TTY && ffmpegCore.TTY.default_tty_ops) {
+                        ffmpegCore.TTY.default_tty_ops.put_char = (tty, val) => {
+                            processChar(val);
+                        };
+                    }
+    
                     self.postMessage({ type: 'ready' });
                 } catch (err) {
                     self.postMessage({ type: 'error', error: err.message });
                 }
                 return;
             }
-
+    
             if (action === 'convert') {
                 let argv = 0;
                 let argPointers = [];
                 currentTotalDuration = totalDurationSeconds || 0;
                 stderrBuffer = "";
-
+    
                 try {
                     ffmpegCore.FS.writeFile(inputName, new Uint8Array(fileData));
-
+    
                     const args = [
                         'ffmpeg',
                         '-y',
-                        '-progress', 'pipe:1',
+                        '-progress', 'pipe:2', // Route machine-readable progress straight to stderr
                         '-i', inputName,
                         '-r', '30',
                         '-pix_fmt', 'yuv420p',
@@ -166,17 +185,17 @@
                         '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
                         outputName
                     ];
-
+    
                     const argc = args.length;
                     argv = ffmpegCore._malloc(argc * 4);
-
+    
                     for (let i = 0; i < argc; i++) {
                         const argPtr = ffmpegCore._malloc(args[i].length + 1);
                         ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
                         ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
                         argPointers.push(argPtr);
                     }
-
+    
                     try {
                         ffmpegCore._main(argc, argv);
                     } catch (err) {
@@ -184,16 +203,15 @@
                             throw err;
                         }
                     }
-
+    
                     const outputData = ffmpegCore.FS.readFile(outputName);
-
+    
                     // Clean virtual file system
                     ffmpegCore.FS.unlink(inputName);
                     ffmpegCore.FS.unlink(outputName);
-
-                    // Transfer output buffer back to main thread zero-copy
+    
                     self.postMessage({ type: 'complete', outputBuffer: outputData.buffer }, [outputData.buffer]);
-
+    
                 } catch (err) {
                     self.postMessage({ type: 'error', error: err.message });
                 } finally {
