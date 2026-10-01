@@ -13,9 +13,8 @@
         #downloadLink { display: inline-block; margin-top: 15px; background: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
     </style>
     
-    <!-- Load UMD bundles -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+    <!-- Load stable single-threaded v0.11.x build -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 </head>
 <body>
 
@@ -33,8 +32,7 @@
     </div>
 
     <script>
-        const { FFmpeg } = FFmpegWASM;
-        const { fetchFile, toBlobURL } = FFmpegUtil;
+        const { createFFmpeg, fetchFile } = FFmpeg;
 
         let ffmpeg = null;
         const uploader = document.getElementById('uploader');
@@ -45,33 +43,22 @@
         async function initFFmpeg() {
             try {
                 console.log("Creating FFmpeg instance...");
-                ffmpeg = new FFmpeg();
                 
-                ffmpeg.on('log', ({ message }) => {
+                // Point explicitly to the single-threaded core
+                ffmpeg = createFFmpeg({
+                    log: true,
+                    corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+                });
+
+                ffmpeg.setLogger(({ message }) => {
                     console.log(message);
                     if (message.includes('size=')) {
                         statusDiv.innerText = "Processing conversion chunks...";
                     }
                 });
 
-                const coreBaseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-                const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-
-                console.log("Creating local Blob URLs for core JS, WASM, and Worker...");
-                
-                // Fetch core assets as Blob URLs on current domain
-                const coreURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.js`, 'text/javascript');
-                const wasmURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.wasm`, 'application/wasm');
-                
-                // Fetch internal UMD worker chunk and turn it into a same-origin Blob URL
-                const classWorkerURL = await toBlobURL(`${ffmpegBaseURL}/814.ffmpeg.js`, 'text/javascript');
-
                 console.log("Loading FFmpeg engine...");
-                await ffmpeg.load({
-                    coreURL,
-                    wasmURL,
-                    classWorkerURL
-                });
+                await ffmpeg.load();
 
                 console.log("FFmpeg loaded successfully!");
                 statusDiv.innerText = "FFmpeg Ready! Select an MP4 file.";
@@ -83,7 +70,7 @@
         }
 
         uploader.addEventListener('change', () => {
-            if (uploader.files.length > 0 && ffmpeg && ffmpeg.loaded) {
+            if (uploader.files.length > 0 && ffmpeg && ffmpeg.isLoaded()) {
                 convertBtn.disabled = false;
             }
         });
@@ -102,10 +89,15 @@
             const outputName = 'output.mp3';
 
             try {
-                await ffmpeg.writeFile(inputName, await fetchFile(file));
-                await ffmpeg.exec(['-i', inputName, '-q:a', '0', '-map', 'a', outputName]);
+                // Write input file to in-memory Emscripten virtual file system
+                ffmpeg.FS('writeFile', inputName, await fetchFile(file));
 
-                const data = await ffmpeg.readFile(outputName);
+                // Run transcoding command
+                await ffmpeg.run('-i', inputName, '-q:a', '0', '-map', 'a', outputName);
+
+                // Read result back out of virtual memory
+                const data = ffmpeg.FS('readFile', outputName);
+
                 const blob = new Blob([data.buffer], { type: 'audio/mp3' });
                 const url = URL.createObjectURL(blob);
 
