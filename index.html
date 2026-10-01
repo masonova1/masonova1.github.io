@@ -11,6 +11,9 @@
         button:disabled { background: #ccc; cursor: not-allowed; }
         #status { font-weight: bold; color: #555; margin: 10px 0; }
         #downloadLink { display: inline-block; margin-top: 15px; background: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
+        .options-group { margin: 15px 0; padding: 10px 0; border-top: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; }
+        .options-group label { display: block; margin: 6px 0; cursor: pointer; }
+        .options-group input[type="radio"] { margin-right: 8px; }
     </style>
 </head>
 <body>
@@ -22,7 +25,23 @@
         <div id="status">Loading FFmpeg core components...</div>
         
         <input type="file" id="uploader" accept="video/mp4" disabled>
-        <br><br>
+        
+        <div class="options-group">
+            <strong>Aspect Ratio Scaling Option:</strong>
+            <label>
+                <input type="radio" name="scaleMode" value="stretch" checked>
+                Fill / Stretch (scale=210:135)
+            </label>
+            <label>
+                <input type="radio" name="scaleMode" value="crop">
+                Cover / Crop (Zoom to fill, trim overflow)
+            </label>
+            <label>
+                <input type="radio" name="scaleMode" value="letterbox">
+                Contain / Letterbox (Pad black bars)
+            </label>
+        </div>
+
         <button id="convertBtn" disabled>Convert MP4 to AVI</button>
         
         <div id="outputArea"></div>
@@ -93,85 +112,111 @@
             const files = uploader.files;
             if (!files || files.length === 0) return;
             const file = files[0];
-        
+
+            // Determine selected video filter scale string
+            const selectedMode = document.querySelector('input[name="scaleMode"]:checked').value;
+            let vfFilter = '';
+
+            switch (selectedMode) {
+                case 'crop':
+                    vfFilter = 'scale=210:135:force_original_aspect_ratio=increase,crop=210:135:exact=1,hqdn3d';
+                    break;
+                case 'letterbox':
+                    vfFilter = 'scale=210:135:force_original_aspect_ratio=decrease,format=yuv444p,pad=210:135:(ow-iw)/2:(oh-ih)/2,format=yuv420p,hqdn3d';
+                    break;
+                case 'stretch':
+                default:
+                    vfFilter = 'scale=210:135,hqdn3d';
+                    break;
+            }
+
             convertBtn.disabled = true;
             uploader.disabled = true;
             statusDiv.innerText = "Converting... Please wait.";
             outputArea.innerHTML = "";
-        
+
             const inputName = 'input.mp4';
             const outputName = 'output.avi';
-        
+
+            let argv = 0;
+            let argPointers = [];
+
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const uint8Array = new Uint8Array(arrayBuffer);
-        
+
                 // Write file directly to Emscripten Virtual File System (MEMFS)
                 ffmpegCore.FS.writeFile(inputName, uint8Array);
-        
-                // Convert JS string args to C-style pointers for main() execution
-                // const args = ['ffmpeg', '-y', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
+
                 const args = [
-                  'ffmpeg',
-                  '-y',
-                  '-i',
-                  inputName,
-                  '-r', '30',
-                  '-pix_fmt', 'yuv420p',
-                  '-strict', 'unofficial',
-                  '-vf', 'scale=208:128,hqdn3d',
-                  '-b:v', '2500k',
-                  '-c:v', 'mjpeg', '-ac', '1', '-acodec', 'pcm_u8',
-                  '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
-                  outputName
-                ]
+                    'ffmpeg',
+                    '-y',
+                    '-i', inputName,
+                    '-r', '30',
+                    '-pix_fmt', 'yuv420p',
+                    '-strict', 'unofficial',
+                    '-vf', vfFilter,
+                    '-b:v', '2500k',
+                    '-c:v', 'mjpeg',
+                    '-ac', '1',
+                    '-acodec', 'pcm_u8',
+                    '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
+                    outputName
+                ];
+
                 const argc = args.length;
-                const argv = ffmpegCore._malloc(argc * 4);
-        
+                argv = ffmpegCore._malloc(argc * 4);
+
                 for (let i = 0; i < argc; i++) {
                     const argPtr = ffmpegCore._malloc(args[i].length + 1);
                     ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
                     ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
+                    argPointers.push(argPtr);
                 }
-        
-                // Execute FFmpeg entrypoint directly
-                console.log("Executing FFmpeg CLI command...");
-                
+
+                console.log(`Executing FFmpeg CLI command with vfFilter: "${vfFilter}"`);
+
                 try {
                     ffmpegCore._main(argc, argv);
                 } catch (err) {
-                    // Emscripten raises an ExitStatus object on exit(code)
                     if (err.name === 'ExitStatus' && err.status === 0) {
                         console.log("FFmpeg exited cleanly with status 0.");
                     } else {
-                        // Throw genuine non-zero execution errors to the outer catch block
                         throw err;
                     }
                 }
-        
+
                 // Read output file from virtual filesystem
                 const outputData = ffmpegCore.FS.readFile(outputName);
-        
+
                 // Create download link
                 const blob = new Blob([outputData.buffer], { type: 'video/avi' });
                 const url = URL.createObjectURL(blob);
-        
+
                 const downloadLink = document.createElement('a');
                 downloadLink.href = url;
                 downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".avi";
                 downloadLink.id = "downloadLink";
                 downloadLink.innerText = "Download Converted AVI";
-        
+
                 outputArea.appendChild(downloadLink);
                 statusDiv.innerText = "Conversion Complete!";
-        
-                // Clean up MEMFS files
+
+                // Clean up MEMFS virtual files
                 ffmpegCore.FS.unlink(inputName);
                 ffmpegCore.FS.unlink(outputName);
             } catch (err) {
                 console.error("Transcoding Error:", err);
                 statusDiv.innerText = "An error occurred during transcoding.";
             } finally {
+                // Free heap memory allocated for CLI argument string pointers
+                for (const ptr of argPointers) {
+                    ffmpegCore._free(ptr);
+                }
+                if (argv) {
+                    ffmpegCore._free(argv);
+                }
+
                 uploader.disabled = false;
                 convertBtn.disabled = false;
             }
