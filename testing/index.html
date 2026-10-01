@@ -89,28 +89,43 @@
                     // Import FFmpeg Core in worker scope
                     importScripts(`${CDN_BASE}/ffmpeg-core.js`);
 
+                    let stderrBuffer = "";
+
                     ffmpegCore = await createFFmpegCore({
                         mainScriptUrlOrBlob: `${CDN_BASE}/ffmpeg-core.js`,
                         locateFile: (path, scriptDirectory) => {
-                            if (path.endsWith('.wasm')) {
-                                return `${CDN_BASE}/${path}`;
-                            }
+                            if (path.endsWith('.wasm')) return `${CDN_BASE}/${path}`;
                             return scriptDirectory + path;
                         },
                         stdin: () => null,
                         print: (text) => console.log("[FFmpeg stdout]:", text),
-                        printErr: (text) => {
-                            console.log("[FFmpeg stderr]:", text);
-                            if (totalDurationSeconds > 0 && text.includes('time=')) {
-                                const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
-                                if (match && match[1]) {
-                                    const currentSeconds = parseTimeToSeconds(match[1]);
-                                    const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
-                                    self.postMessage({ type: 'progress', percentage });
-                                }
+                        printErr: (chunk) => {
+                            // Emscripten may pass chunks, single chars, or whole lines
+                            stderrBuffer += chunk;
+                            
+                            // Split on both carriage returns and newlines
+                            const lines = stderrBuffer.split(/[\r\n]+/);
+                            
+                            // Keep the last partial segment in the buffer
+                            stderrBuffer = lines.pop();
+                    
+                            for (const line of lines) {
+                                parseProgress(line);
                             }
                         }
                     });
+                    
+                    function parseProgress(text) {
+                        if (totalDurationSeconds > 0 && text.includes('time=')) {
+                            // Extract time=HH:MM:SS.ss
+                            const match = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d+)/);
+                            if (match && match[1]) {
+                                const currentSeconds = parseTimeToSeconds(match[1]);
+                                const percentage = Math.min(100, Math.round((currentSeconds / totalDurationSeconds) * 100));
+                                self.postMessage({ type: 'progress', percentage });
+                            }
+                        }
+                    }
 
                     self.postMessage({ type: 'ready' });
                 } catch (err) {
