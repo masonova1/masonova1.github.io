@@ -13,7 +13,7 @@
         #downloadLink { display: inline-block; margin-top: 15px; background: #28a745; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
     </style>
     
-    <!-- Load UMD bundles to bypass ESM worker origin restrictions -->
+    <!-- Load UMD bundles -->
     <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
     <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 </head>
@@ -33,7 +33,6 @@
     </div>
 
     <script>
-        // Extract classes exposed on global window object by UMD scripts
         const { FFmpeg } = FFmpegWASM;
         const { fetchFile, toBlobURL } = FFmpegUtil;
 
@@ -55,17 +54,23 @@
                     }
                 });
 
-                // Single-threaded core URL (UMD build)
-                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const coreBaseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
 
-                console.log("Downloading core JS and WASM as local Blobs...");
-                const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
-                const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
+                console.log("Creating local Blob URLs for core JS, WASM, and Worker...");
+                
+                // Fetch core assets as Blob URLs on current domain
+                const coreURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.js`, 'text/javascript');
+                const wasmURL = await toBlobURL(`${coreBaseURL}/ffmpeg-core.wasm`, 'application/wasm');
+                
+                // Fetch internal UMD worker chunk and turn it into a same-origin Blob URL
+                const classWorkerURL = await toBlobURL(`${ffmpegBaseURL}/814.ffmpeg.js`, 'text/javascript');
 
                 console.log("Loading FFmpeg engine...");
                 await ffmpeg.load({
                     coreURL,
-                    wasmURL
+                    wasmURL,
+                    classWorkerURL
                 });
 
                 console.log("FFmpeg loaded successfully!");
