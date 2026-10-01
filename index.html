@@ -93,53 +93,64 @@
             const files = uploader.files;
             if (!files || files.length === 0) return;
             const file = files[0];
-
+        
             convertBtn.disabled = true;
             uploader.disabled = true;
             statusDiv.innerText = "Converting... Please wait.";
             outputArea.innerHTML = "";
-
+        
             const inputName = 'input.mp4';
             const outputName = 'output.mp3';
-
+        
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const uint8Array = new Uint8Array(arrayBuffer);
-
+        
                 // Write file directly to Emscripten Virtual File System (MEMFS)
                 ffmpegCore.FS.writeFile(inputName, uint8Array);
-
+        
                 // Convert JS string args to C-style pointers for main() execution
                 const args = ['ffmpeg', '-y', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
                 const argc = args.length;
                 const argv = ffmpegCore._malloc(argc * 4);
-
+        
                 for (let i = 0; i < argc; i++) {
                     const argPtr = ffmpegCore._malloc(args[i].length + 1);
                     ffmpegCore.stringToUTF8(args[i], argPtr, args[i].length + 1);
                     ffmpegCore.setValue(argv + i * 4, argPtr, 'i32');
                 }
-
+        
                 // Execute FFmpeg entrypoint directly
                 console.log("Executing FFmpeg CLI command...");
-                ffmpegCore._main(argc, argv);
-
+                
+                try {
+                    ffmpegCore._main(argc, argv);
+                } catch (err) {
+                    // Emscripten raises an ExitStatus object on exit(code)
+                    if (err.name === 'ExitStatus' && err.status === 0) {
+                        console.log("FFmpeg exited cleanly with status 0.");
+                    } else {
+                        // Throw genuine non-zero execution errors to the outer catch block
+                        throw err;
+                    }
+                }
+        
                 // Read output file from virtual filesystem
                 const outputData = ffmpegCore.FS.readFile(outputName);
-
+        
                 // Create download link
                 const blob = new Blob([outputData.buffer], { type: 'audio/mp3' });
                 const url = URL.createObjectURL(blob);
-
+        
                 const downloadLink = document.createElement('a');
                 downloadLink.href = url;
                 downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
                 downloadLink.id = "downloadLink";
                 downloadLink.innerText = "Download Converted MP3";
-
+        
                 outputArea.appendChild(downloadLink);
                 statusDiv.innerText = "Conversion Complete!";
-
+        
                 // Clean up MEMFS files
                 ffmpegCore.FS.unlink(inputName);
                 ffmpegCore.FS.unlink(outputName);
