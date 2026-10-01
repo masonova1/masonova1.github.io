@@ -16,14 +16,14 @@
 <body>
 
     <h2>Single-Threaded FFmpeg Converter</h2>
-    <p>Convert an <code>.mp4</code> video to an <code>.mp3</code> audio entirely client-side on standard GitHub Pages.</p>
+    <p>Convert an <code>.mp4</code> video to TinyTV <code>.avi</code> audio entirely client-side on standard GitHub Pages.</p>
 
     <div class="box">
         <div id="status">Loading FFmpeg core components...</div>
         
         <input type="file" id="uploader" accept="video/mp4" disabled>
         <br><br>
-        <button id="convertBtn" disabled>Convert MP4 to MP3</button>
+        <button id="convertBtn" disabled>Convert MP4 to AVI</button>
         
         <div id="outputArea"></div>
     </div>
@@ -100,7 +100,7 @@
             outputArea.innerHTML = "";
         
             const inputName = 'input.mp4';
-            const outputName = 'output.mp3';
+            const outputName = 'output.avi';
         
             try {
                 const arrayBuffer = await file.arrayBuffer();
@@ -110,7 +110,21 @@
                 ffmpegCore.FS.writeFile(inputName, uint8Array);
         
                 // Convert JS string args to C-style pointers for main() execution
-                const args = ['ffmpeg', '-y', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
+                // const args = ['ffmpeg', '-y', '-i', inputName, '-q:a', '0', '-map', 'a', outputName];
+                const args = [
+                  'ffmpeg',
+                  '-y',
+                  '-i',
+                  inputName,
+                  '-r', '30',
+                  '-pix_fmt', 'yuv420p',
+                  '-strict', 'unofficial',
+                  '-vf', 'scale=208:128,hqdn3d',
+                  '-b:v', '2500k',
+                  '-c:v', 'mjpeg', '-ac', '1', '-acodec', 'pcm_u8',
+                  '-af', 'volume=0.0dB,aresample=10000,aresample=async=1000,aresample=osf=u8,asetnsamples=n=210:p=0',
+                  outputName
+                ]
                 const argc = args.length;
                 const argv = ffmpegCore._malloc(argc * 4);
         
@@ -144,9 +158,9 @@
         
                 const downloadLink = document.createElement('a');
                 downloadLink.href = url;
-                downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
+                downloadLink.download = file.name.replace(/\.[^/.]+$/, "") + ".avi";
                 downloadLink.id = "downloadLink";
-                downloadLink.innerText = "Download Converted MP3";
+                downloadLink.innerText = "Download Converted AVI";
         
                 outputArea.appendChild(downloadLink);
                 statusDiv.innerText = "Conversion Complete!";
